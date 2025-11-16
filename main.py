@@ -1,12 +1,12 @@
 import os
 import logging
 import uuid
-import asyncio
 import threading
+import asyncio
 from datetime import datetime, timedelta
+from flask import Flask, send_file
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from flask import Flask, send_file
 
 # Configuración
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 file_storage = {}
 
 # Inicializar Flask
-flask_app = Flask(__name__)
+app = Flask(__name__)
 
-@flask_app.route('/download/<file_id>')
+@app.route('/download/<file_id>')
 def download_file(file_id):
     """Endpoint para descargar archivos"""
     try:
@@ -51,15 +51,16 @@ def download_file(file_id):
         logger.error(f"Error descargando: {e}")
         return "❌ Error al descargar", 500
 
-@flask_app.route('/health')
+@app.route('/health')
 def health_check():
-    return "✅ Bot funcionando"
+    return "✅ Servidor funcionando"
 
-# Funciones del Bot de Telegram
+@app.route('/')
+def home():
+    return "🤖 File to Link Bot - Servidor activo"
+
+# Funciones del Bot
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador del comando /start"""
-    logger.info(f"Usuario {update.effective_user.id} ejecutó /start")
-    
     welcome_text = """
 🤖 **File to Link Bot**
 
@@ -73,7 +74,6 @@ Envía cualquier archivo y recibirás un enlace de descarga temporal.
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador de archivos"""
     try:
         user = update.message.from_user
         logger.info(f"Usuario {user.id} envió un archivo")
@@ -122,7 +122,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error al procesar el archivo")
 
 async def cleanup_task():
-    """Tarea de limpieza"""
+    """Tarea de limpieza de archivos expirados"""
     while True:
         try:
             current_time = datetime.now()
@@ -142,60 +142,54 @@ async def cleanup_task():
         except Exception as e:
             logger.error(f"Error en cleanup: {e}")
         
-        await asyncio.sleep(3600)
+        await asyncio.sleep(3600)  # Esperar 1 hora
 
 def run_bot():
-    """Ejecutar el bot de Telegram"""
+    """Ejecutar el bot de Telegram en su propio event loop"""
     try:
-        logger.info("Iniciando bot de Telegram...")
+        # Crear un nuevo event loop para el bot
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        # Crear aplicación
-        application = Application.builder().token(BOT_TOKEN).build()
+        async def bot_main():
+            application = Application.builder().token(BOT_TOKEN).build()
+            
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(MessageHandler(
+                filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, 
+                handle_file
+            ))
+            
+            # Iniciar tarea de limpieza
+            asyncio.create_task(cleanup_task())
+            
+            logger.info("🤖 Bot de Telegram iniciado correctamente")
+            await application.run_polling()
         
-        # Añadir handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(
-            filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, 
-            handle_file
-        ))
-        
-        logger.info("Bot configurado, iniciando polling...")
-        
-        # Iniciar polling
-        application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
+        # Ejecutar el bot en este loop
+        loop.run_until_complete(bot_main())
         
     except Exception as e:
         logger.error(f"Error en el bot: {e}")
 
 def run_flask():
     """Ejecutar servidor Flask"""
-    try:
-        logger.info("Iniciando servidor Flask...")
-        flask_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
-    except Exception as e:
-        logger.error(f"Error en Flask: {e}")
+    logger.info(f"🌐 Iniciando servidor Flask en puerto {PORT}...")
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
-def main():
-    """Función principal"""
+if __name__ == '__main__':
     # Crear directorio de archivos
     os.makedirs("files", exist_ok=True)
     
-    # Iniciar Flask en un hilo separado
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Iniciar tarea de limpieza en segundo plano
-    asyncio.run(cleanup_task_background())
-    
-    # Iniciar el bot (esto se bloqueará)
-    run_bot()
-
-async def cleanup_task_background():
-    """Ejecutar limpieza en segundo plano"""
-    asyncio.create_task(cleanup_task())
-
-if __name__ == '__main__':
-    main()
+    # Verificar token del bot
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN no configurado - Solo servidor Flask")
+        run_flask()
+    else:
+        # Iniciar bot en un hilo separado
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        logger.info("✅ Bot iniciado en hilo separado")
+        
+        # Iniciar Flask en el hilo principal
+        run_flask()
