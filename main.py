@@ -2,15 +2,16 @@ import os
 import logging
 import uuid
 import asyncio
+import threading
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask, send_file
 
-# Configuración con puerto 8000
+# Configuración
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHOREO_BASE_URL = os.getenv("CHOREO_BASE_URL")
-PORT = int(os.getenv("PORT", "8000"))  # ✅ Puerto 8000 por defecto
+PORT = int(os.getenv("PORT", "8000"))
 
 # Configurar logging
 logging.basicConfig(
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Almacenamiento en memoria
 file_storage = {}
 
-# Inicializar Flask para las descargas
+# Inicializar Flask
 flask_app = Flask(__name__)
 
 @flask_app.route('/download/<file_id>')
@@ -34,7 +35,6 @@ def download_file(file_id):
         
         file_info = file_storage[file_id]
         
-        # Verificar expiración (24 horas)
         if datetime.now() - file_info['created_at'] > timedelta(hours=24):
             if os.path.exists(file_info['path']):
                 os.remove(file_info['path'])
@@ -57,6 +57,9 @@ def health_check():
 
 # Funciones del Bot de Telegram
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejador del comando /start"""
+    logger.info(f"Usuario {update.effective_user.id} ejecutó /start")
+    
     welcome_text = """
 🤖 **File to Link Bot**
 
@@ -70,6 +73,7 @@ Envía cualquier archivo y recibirás un enlace de descarga temporal.
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejador de archivos"""
     try:
         user = update.message.from_user
         logger.info(f"Usuario {user.id} envió un archivo")
@@ -118,6 +122,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error al procesar el archivo")
 
 async def cleanup_task():
+    """Tarea de limpieza"""
     while True:
         try:
             current_time = datetime.now()
@@ -140,29 +145,57 @@ async def cleanup_task():
         await asyncio.sleep(3600)
 
 def run_bot():
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(
-        filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, 
-        handle_file
-    ))
-    
-    application.run_polling()
+    """Ejecutar el bot de Telegram"""
+    try:
+        logger.info("Iniciando bot de Telegram...")
+        
+        # Crear aplicación
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Añadir handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(MessageHandler(
+            filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, 
+            handle_file
+        ))
+        
+        logger.info("Bot configurado, iniciando polling...")
+        
+        # Iniciar polling
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
+        
+    except Exception as e:
+        logger.error(f"Error en el bot: {e}")
 
-async def main():
+def run_flask():
+    """Ejecutar servidor Flask"""
+    try:
+        logger.info("Iniciando servidor Flask...")
+        flask_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"Error en Flask: {e}")
+
+def main():
+    """Función principal"""
+    # Crear directorio de archivos
     os.makedirs("files", exist_ok=True)
-    asyncio.create_task(cleanup_task())
-    await run_bot()
-
-if __name__ == '__main__':
-    import threading
     
-    def run_flask():
-        flask_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)  # ✅ Puerto 8000
-    
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
+    # Iniciar Flask en un hilo separado
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    asyncio.run(main())
+    # Iniciar tarea de limpieza en segundo plano
+    asyncio.run(cleanup_task_background())
+    
+    # Iniciar el bot (esto se bloqueará)
+    run_bot()
+
+async def cleanup_task_background():
+    """Ejecutar limpieza en segundo plano"""
+    asyncio.create_task(cleanup_task())
+
+if __name__ == '__main__':
+    main()
