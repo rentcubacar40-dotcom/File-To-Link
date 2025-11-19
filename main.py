@@ -10,7 +10,7 @@ API_ID = 20534584  # De my.telegram.org
 API_HASH = "6d5b13261d2c92a9a00afc1fd613b9df"  # De my.telegram.org  
 BOT_TOKEN = "8172167976:AAHGIvygDZVcEi1z7yghxp8IGR1RPm87waY"  # De @BotFather
 ADMIN_ID = "7363341763"  # De @userinfobot
-RENDER_URL = "https://tu-app.onrender.com"  # Tu URL de Render
+RENDER_URL = "https://filetolink-eliel.onrender.com"  # Tu URL de Render
 
 # Configuración
 file_registry = {}
