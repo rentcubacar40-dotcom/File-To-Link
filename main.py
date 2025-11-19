@@ -1,76 +1,130 @@
 import os
 import asyncio
+import time
+from flask import Flask, send_file
 from telethon import TelegramClient, events
-from redis import Redis
+from threading import Thread
 
-# Configuración desde Variables de Entorno
-API_ID = int(os.getenv('API_ID', 0))
-API_HASH = os.getenv('API_HASH', '')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
-ADMIN_ID = os.getenv('ADMIN_ID', '')
+# 🔥 VARIABLES - REEMPLAZA CON TUS DATOS
+API_ID = 20534584  # De my.telegram.org
+API_HASH = "6d5b13261d2c92a9a00afc1fd613b9df"  # De my.telegram.org  
+BOT_TOKEN = "8172167976:AAHGIvygDZVcEi1z7yghxp8IGR1RPm87waY"  # De @BotFather
+ADMIN_ID = "7363341763"  # De @userinfobot
+RENDER_URL = "https://nelson-file2link.onrender.com"  # Tu URL de Render
 
-# Inicializar clientes
-redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
+# Almacenamiento en memoria
+file_registry = {}
 client = TelegramClient('bot_session', API_ID, API_HASH)
+app = Flask(__name__)
 
-def get_file_info(file_id):
-    return redis_client.hgetall(f'file:{file_id}')
+# Crear directorios
+os.makedirs('static/files', exist_ok=True)
+
+def cleanup_expired_files():
+    """Limpia archivos expirados (24 horas)"""
+    current_time = time.time()
+    expired_files = []
+    
+    for file_id, file_data in file_registry.items():
+        if current_time - file_data['timestamp'] > 86400:  # 24 horas
+            expired_files.append(file_id)
+    
+    for file_id in expired_files:
+        delete_file(file_id)
+    
+    if expired_files:
+        print(f"🧹 Limpiados {len(expired_files)} archivos expirados")
 
 def delete_file(file_id):
-    return redis_client.delete(f'file:{file_id}')
+    """Eliminar archivo del sistema"""
+    file_path = f"static/files/{file_id}"
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    if file_id in file_registry:
+        del file_registry[file_id]
+    return True
 
 def get_user_files(user_id):
-    user_files = []
-    for key in redis_client.scan_iter('file:*'):
-        file_data = redis_client.hgetall(key)
-        if file_data.get('user_id') == str(user_id):
-            file_id = key.split(':')[1]
-            user_files.append((file_id, file_data))
-    return user_files
+    """Obtener archivos de un usuario"""
+    return {fid: data for fid, data in file_registry.items() 
+            if data.get('user_id') == str(user_id)}
 
 def get_all_files():
-    """Obtiene TODOS los archivos (solo para admin)"""
-    all_files = []
-    for key in redis_client.scan_iter('file:*'):
-        file_data = redis_client.hgetall(key)
-        file_id = key.split(':')[1]
-        all_files.append((file_id, file_data))
-    return all_files
+    """Obtener todos los archivos"""
+    return file_registry
 
 def get_stats():
-    """Estadísticas generales del bot"""
-    total_files = 0
-    total_size = 0
-    user_ids = set()
-    
-    for key in redis_client.scan_iter('file:*'):
-        file_data = redis_client.hgetall(key)
-        total_files += 1
-        total_size += int(file_data.get('size', 0))
-        user_ids.add(file_data.get('user_id', ''))
-    
-    return total_files, total_size, len(user_ids)
+    """Estadísticas del sistema"""
+    total_files = len(file_registry)
+    total_size = sum(data.get('size', 0) for data in file_registry.values())
+    unique_users = len(set(data.get('user_id') for data in file_registry.values()))
+    return total_files, total_size, unique_users
 
 def is_admin(user_id):
-    """Verifica si el usuario es administrador"""
+    """Verificar si es administrador"""
     return str(user_id) == ADMIN_ID
 
+# RUTAS WEB
+@app.route('/')
+def home():
+    total_files, total_size, unique_users = get_stats()
+    return f"""
+    <h1>🤖 File to Link Bot</h1>
+    <p><strong>Estado:</strong> Online</p>
+    <p><strong>Archivos activos:</strong> {total_files}</p>
+    <p><strong>Espacio usado:</strong> {total_size / 1024 / 1024:.2f} MB</p>
+    <p><strong>Usuarios únicos:</strong> {unique_users}</p>
+    <hr>
+    <p><em>Usa el bot de Telegram para subir archivos</em></p>
+    """
+
+@app.route('/static/<file_id>/downloads/<filename>')
+def download_file(file_id, filename):
+    """Servir archivo para descarga directa"""
+    if file_id not in file_registry:
+        return "❌ Archivo no encontrado o expirado", 404
+    
+    file_path = f"static/files/{file_id}"
+    if not os.path.exists(file_path):
+        return "❌ Archivo no disponible", 404
+    
+    file_data = file_registry[file_id]
+    
+    # Verificar expiración (24 horas)
+    if time.time() - file_data['timestamp'] > 86400:
+        delete_file(file_id)
+        return "❌ Archivo expirado", 410
+    
+    original_name = file_data.get('name', 'file')
+    return send_file(file_path, as_attachment=True, download_name=original_name)
+
+@app.route('/api/stats')
+def api_stats():
+    """API de estadísticas"""
+    total_files, total_size, unique_users = get_stats()
+    return {
+        "status": "online",
+        "total_files": total_files,
+        "total_size_mb": round(total_size / 1024 / 1024, 2),
+        "unique_users": unique_users
+    }
+
+# HANDLERS DE TELEGRAM
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     user = await event.get_sender()
-    admin_text = "\n👑 **Eres administrador** - Usa /admin para panel de control" if is_admin(event.sender_id) else ""
+    admin_text = "\n👑 **Eres administrador** - Usa /admin" if is_admin(event.sender_id) else ""
     
     await event.reply(
-        f'🤖 **Bot File to Link**\n\n'
+        f'🤖 **File to Link Bot**\n\n'
         f'Hola {user.first_name}!{admin_text}\n\n'
-        '**Comandos disponibles:**\n'
-        '• /start - Mostrar este mensaje\n'
-        '• /myfiles - Ver tus archivos\n' 
-        '• /delete [id] - Eliminar un archivo\n'
-        '• /info - Información del bot\n'
-        '• /stats - Estadísticas\n\n'
-        '¡Envía un archivo para comenzar!'
+        '**Envía cualquier archivo y recibirás:**\n'
+        f'• 🔗 Enlace directo formato: `{RENDER_URL}/static/123456/downloads/archivo.ext`\n'
+        '• 📱 Compatible con navegadores\n'
+        '• ⏰ Válido por 24 horas\n'
+        '• 💾 Sin base de datos externa\n\n'
+        '**Comandos:** /myfiles, /stats, /info\n\n'
+        '¡Envía un archivo ahora!'
     )
 
 @client.on(events.NewMessage(pattern='/admin'))
@@ -88,10 +142,10 @@ async def admin_handler(event):
         f'• Espacio usado: {total_size / 1024 / 1024:.2f} MB\n'
         f'• Usuarios únicos: {unique_users}\n\n'
         '**Comandos de Admin:**\n'
-        '• /listfiles - Listar todos los archivos\n'
+        '• /listfiles - Ver todos los archivos\n'
         '• /cleanup - Limpiar archivos expirados\n'
-        '• /deleteall - Eliminar TODOS los archivos\n'
-        '• /delete [id] - Eliminar archivo específico (de cualquier usuario)\n'
+        '• /deleteall confirm - Eliminar TODOS los archivos\n'
+        '• /delete [id] - Eliminar archivo específico\n'
     )
     
     await event.reply(response)
@@ -108,58 +162,41 @@ async def listfiles_handler(event):
         await event.reply('📭 **No hay archivos activos.**')
         return
     
-    # SIN LÍMITES - dividimos en múltiples mensajes si es necesario
+    response = '📂 **Todos los archivos activos:**\n\n'
     total_size = 0
-    response_parts = []
-    current_response = '📂 **Todos los archivos activos:**\n\n'
     
-    for i, (file_id, file_data) in enumerate(all_files, 1):
-        file_name = file_data.get('name', 'Sin nombre')[:30]  # Limitar nombre para evitar overflow
-        file_size = int(file_data.get('size', 0))
+    for i, (file_id, file_data) in enumerate(list(all_files.items())[:15], 1):
+        file_name = file_data.get('name', 'Sin nombre')[:30]
+        file_size = file_data.get('size', 0)
         user_id = file_data.get('user_id', 'Desconocido')
-        ttl = redis_client.ttl(f'file:{file_id}')
-        hours = ttl // 3600
-        minutes = (ttl % 3600) // 60
+        time_left = 86400 - (time.time() - file_data['timestamp'])
+        hours = int(time_left // 3600)
+        minutes = int((time_left % 3600) // 60)
         
-        file_entry = (
-            f'**{i}. {file_name}**\n'
-            f'   👤 User: `{user_id}`\n'
-            f'   📦 {file_size / 1024 / 1024:.2f} MB\n'
-            f'   ⏰ {hours}h {minutes}m\n'
-            f'   🗑️ `/delete {file_id}`\n\n'
-        )
+        download_url = f"{RENDER_URL}/static/{file_id}/downloads/{file_data.get('name', 'file')}"
         
-        # Si el mensaje actual sería muy largo, guardar y empezar nuevo
-        if len(current_response) + len(file_entry) > 4000:
-            response_parts.append(current_response)
-            current_response = f'📂 **Continuación...**\n\n{file_entry}'
-        else:
-            current_response += file_entry
+        response += f'**{i}. {file_name}**\n'
+        response += f'   👤 User: `{user_id}`\n'
+        response += f'   📦 {file_size / 1024 / 1024:.2f} MB\n'
+        response += f'   ⏰ {hours}h {minutes}m\n'
+        response += f'   🔗 `/delete {file_id}`\n\n'
         
         total_size += file_size
     
-    # Agregar la última parte
-    if current_response:
-        current_response += f'📊 **Total:** {len(all_files)} archivos, {total_size / 1024 / 1024:.2f} MB'
-        response_parts.append(current_response)
+    response += f'📊 **Total:** {len(all_files)} archivos, {total_size / 1024 / 1024:.2f} MB'
     
-    # Enviar todos los mensajes
-    for part in response_parts:
-        await event.reply(part)
-        await asyncio.sleep(1)  # Pequeña pausa para evitar flood
+    await event.reply(response)
 
 @client.on(events.NewMessage(pattern='/cleanup'))
 async def cleanup_handler(event):
     if not is_admin(event.sender_id):
         return
     
-    deleted_count = 0
-    for key in redis_client.scan_iter('file:*'):
-        ttl = redis_client.ttl(key)
-        if ttl < 1:  # Archivos expirados
-            redis_client.delete(key)
-            deleted_count += 1
+    initial_count = len(file_registry)
+    cleanup_expired_files()
+    final_count = len(file_registry)
     
+    deleted_count = initial_count - final_count
     await event.reply(f'🧹 **Limpieza completada:** {deleted_count} archivos expirados eliminados.')
 
 @client.on(events.NewMessage(pattern='/deleteall'))
@@ -175,10 +212,11 @@ async def deleteall_handler(event):
         )
         return
     
-    total_files = len(list(redis_client.scan_iter('file:*')))
+    total_files = len(file_registry)
     
-    for key in redis_client.scan_iter('file:*'):
-        redis_client.delete(key)
+    # Eliminar todos los archivos
+    for file_id in list(file_registry.keys()):
+        delete_file(file_id)
     
     await event.reply(f'🗑️ **Eliminados {total_files} archivos.**')
 
@@ -192,17 +230,23 @@ async def myfiles_handler(event):
         return
     
     response = '📂 **Tus archivos activos:**\n\n'
-    for file_id, file_data in user_files:
+    for file_id, file_data in list(user_files.items())[:10]:
         file_name = file_data.get('name', 'Sin nombre')
         file_size = file_data.get('size', 0)
-        ttl = redis_client.ttl(f'file:{file_id}')
-        hours = ttl // 3600
-        minutes = (ttl % 3600) // 60
+        time_left = 86400 - (time.time() - file_data['timestamp'])
+        hours = int(time_left // 3600)
+        minutes = int((time_left % 3600) // 60)
+        
+        download_url = f"{RENDER_URL}/static/{file_id}/downloads/{file_name}"
         
         response += f'📁 `{file_name}`\n'
-        response += f'📦 {int(file_size) / 1024 / 1024:.2f} MB\n'
+        response += f'📦 {file_size / 1024 / 1024:.2f} MB\n'
         response += f'⏰ Expira en: {hours}h {minutes}m\n'
+        response += f'🔗 `{download_url}`\n'
         response += f'🗑️ Eliminar: `/delete {file_id}`\n\n'
+    
+    if len(user_files) > 10:
+        response += f'📋 ...y {len(user_files) - 10} archivos más\n'
     
     response += '💡 *Usa /delete [id] para eliminar un archivo*'
     
@@ -225,12 +269,13 @@ async def delete_handler(event):
     file_id = args[1].strip()
     
     # Verificar que el archivo existe
-    file_data = get_file_info(file_id)
-    if not file_data:
+    if file_id not in file_registry:
         await event.reply('❌ **Archivo no encontrado.** Puede haber expirado o no existir.')
         return
     
-    # Verificar permisos: usuario normal solo puede eliminar sus archivos, admin puede eliminar cualquiera
+    file_data = file_registry[file_id]
+    
+    # Verificar permisos
     if not is_admin(user_id) and file_data.get('user_id') != str(user_id):
         await event.reply('❌ **No tienes permisos** para eliminar este archivo.')
         return
@@ -252,7 +297,8 @@ async def stats_handler(event):
         '📊 **Estadísticas del Bot:**\n\n'
         f'• Archivos activos: {total_files}\n'
         f'• Espacio total: {total_size / 1024 / 1024:.2f} MB\n'
-        f'• Usuarios únicos: {unique_users}{admin_text}'
+        f'• Usuarios únicos: {unique_users}\n'
+        f'• Estado: ✅ Online{admin_text}'
     )
 
 @client.on(events.NewMessage(pattern='/info'))
@@ -260,11 +306,11 @@ async def info_handler(event):
     user_files = get_user_files(event.sender_id)
     await event.reply(
         'ℹ️ **Información del Bot**\n\n'
-        '• 🤖 Desarrollado con Telethon\n'
+        '• 🤖 Desarrollado con Telethon + Flask\n'
         '• 🚀 Hosteado en Render.com\n'
-        '• 💾 Almacenamiento temporal (24h)\n'
+        '• 💾 Almacenamiento en memoria (24h)\n'
         '• 📦 Soporte para archivos grandes\n'
-        '• 🔒 Enlaces temporales seguros\n'
+        '• 🔗 Enlaces directos permanentes\n'
         '• 🗑️ Eliminación manual disponible\n\n'
         f'📊 **Tus archivos activos:** {len(user_files)}'
     )
@@ -276,50 +322,73 @@ async def file_handler(event):
         msg = await event.reply('📥 **Descargando archivo...**')
         
         # Descargar archivo
-        file = await event.download_media(file=bytes)
+        file_id = str(event.file.id)
+        file_path = f"static/files/{file_id}"
+        await event.download_media(file=file_path)
         
         await msg.edit('🔗 **Generando enlace...**')
         
-        # Obtener información del archivo
-        original_msg = await event.get_message()
-        file_name = original_msg.file.name or f"file_{original_msg.file.id}"
-        file_size = original_msg.file.size or len(file)
+        # Información del archivo
+        file_name = event.file.name or f"file_{file_id}"
+        file_size = event.file.size or os.path.getsize(file_path)
         
-        # Guardar en Redis
-        file_id = str(original_msg.file.id)
-        file_data = {
+        # Registrar en memoria
+        file_registry[file_id] = {
             'name': file_name,
-            'size': str(file_size),
+            'size': file_size,
             'user_id': str(user_id),
-            'timestamp': str(event.message.date.timestamp())
+            'timestamp': time.time()
         }
         
-        redis_client.hset(f'file:{file_id}', mapping=file_data)
-        redis_client.expire(f'file:{file_id}', 86400)  # 24 horas
-        
-        # Generar información del enlace
-        file_link = f"https://t.me/{event.chat.username}/{event.message.id}" if event.chat.username else f"File ID: {file_id}"
+        # Generar enlace directo
+        download_url = f"{RENDER_URL}/static/{file_id}/downloads/{file_name}"
         
         response = (
             f'✅ **Archivo procesado correctamente!**\n\n'
             f'📁 **Nombre:** `{file_name}`\n'
             f'📦 **Tamaño:** {file_size / 1024 / 1024:.2f} MB\n'
-            f'🔗 **Enlace:** {file_link}\n'
+            f'🔗 **Enlace directo:**\n`{download_url}`\n\n'
             f'🆔 **ID:** `{file_id}`\n'
             f'⏰ **Válido por:** 24 horas\n\n'
-            f'💡 *Usa `/myfiles` para ver tus archivos o `/delete {file_id}` para eliminar*'
+            f'💡 *Copia y comparte el enlace donde quieras*\n'
+            f'📊 *Usa /myfiles para ver tus archivos*'
         )
         
         await msg.edit(response)
         
+        # Limpiar archivos expirados
+        cleanup_expired_files()
+        
     except Exception as e:
         await event.reply(f'❌ **Error:** {str(e)}')
 
-async def main():
+def run_flask():
+    """Ejecutar servidor Flask"""
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+async def run_telegram():
+    """Ejecutar bot de Telegram"""
     await client.start(bot_token=BOT_TOKEN)
-    print('🤖 Bot iniciado correctamente!')
-    print(f'👑 Admin ID: {ADMIN_ID}')
+    print('🤖 Bot de Telegram iniciado correctamente!')
+    print(f'🌐 Servidor web: {RENDER_URL}')
+    print(f'📊 Archivos en memoria: {len(file_registry)}')
     await client.run_until_disconnected()
 
+def main():
+    """Ejecutar ambos servicios"""
+    print('🚀 Iniciando File to Link Bot (Sin Redis)...')
+    
+    # Limpiar archivos expirados al inicio
+    cleanup_expired_files()
+    
+    # Iniciar Flask en hilo separado
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Iniciar Telegram en el hilo principal
+    asyncio.run(run_telegram())
+
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
