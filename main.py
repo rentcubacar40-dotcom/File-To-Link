@@ -281,7 +281,7 @@ async def stats_handler(event):
         f'• Usuarios: {unique_users}{admin_text}'
     )
 
-@client.on(events.NewMessage(func=lambda e: e.file and not e.media_webpage))
+@client.on(events.NewMessage(func=lambda e: e.file))
 async def file_handler(event):
     try:
         user_id = event.sender_id
