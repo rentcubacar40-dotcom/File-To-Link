@@ -1,3 +1,15 @@
+# FIX IMGHDR PARA PYTHON 3.13+
+import sys
+if sys.version_info >= (3, 13):
+    import types
+    # Crear módulo imghdr falso
+    imghdr = types.ModuleType('imghdr')
+    
+    def what(file, h=None):
+        return 'jpeg'  # Simplemente retorna un valor por defecto
+    
+    imghdr.what = what
+    sys.modules['imghdr'] = imghdr
 import os
 import asyncio
 import time
