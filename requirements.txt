@@ -1,2 +1,2 @@
-flask==2.3.3
-python-telegram-bot==20.7
+telethon==1.28.5
+redis==4.5.4
